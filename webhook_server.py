@@ -1,23 +1,19 @@
-from flask import Flask, request, jsonify, Response, stream_with_context
-from urllib.parse import quote as url_quote  # Substituição compatível
 import os
 import hashlib
 import hmac
-import time
+import base64
+from flask import Flask, request, jsonify, Response, stream_with_context
+from urllib.parse import quote as url_quote
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# Config
-WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "default-secret")
-VOICE_ID = os.environ.get("ELEVENLABS_VOICE_ID")
-AGENT_ID = os.environ.get("ELEVENLABS_AGENT_ID")
-API_KEY = os.environ.get("ELEVENLABS_API_KEY")
-
-
-@app.route("/")
-def health():
-    return jsonify(status="alive"), 200
-
+@app.route("/", methods=["GET"])
+def index():
+    return "🛰️ Webhook server online..."
 
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -25,58 +21,49 @@ def chat():
     message = data.get("message", "")
     session_id = data.get("session_id", "default-session")
 
-    # Faz requisição para obter URL assinada
-    import requests
-
     signed_url_endpoint = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url"
     headers = {
-        "xi-api-key": API_KEY
+        "xi-api-key": os.getenv("ELEVENLABS_API_KEY")
     }
     params = {
-        "agent_id": AGENT_ID
+        "agent_id": os.getenv("ELEVENLABS_AGENT_ID")
     }
 
-    signed_response = requests.get(signed_url_endpoint, headers=headers, params=params)
-    if signed_response.status_code != 200:
-        return jsonify(error="Erro ao obter URL assinada", detail=signed_response.text), 500
+    response = requests.get(signed_url_endpoint, headers=headers, params=params)
+    if response.status_code != 200:
+        return jsonify({"error": "Failed to get signed URL", "details": response.text}), 500
 
-    signed_url = signed_response.json()["signed_url"]
+    ws_url = response.json().get("url")
+    if not ws_url:
+        return jsonify({"error": "No signed URL returned"}), 500
 
-    # Envia mensagem
-    message_payload = {
-        "agent_id": AGENT_ID,
-        "voice_id": VOICE_ID,
-        "message": message,
-        "session_id": session_id
-    }
+    audio_stream_url = f"{ws_url}&message={url_quote(message)}&session_id={url_quote(session_id)}"
 
-    response = requests.post(signed_url, json=message_payload, stream=True)
+    audio_response = requests.get(audio_stream_url, stream=True)
 
     def generate():
-        for chunk in response.iter_content(chunk_size=4096):
+        for chunk in audio_response.iter_content(chunk_size=4096):
             if chunk:
                 yield chunk
 
     return Response(stream_with_context(generate()), content_type="audio/mpeg")
 
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    secret = os.getenv("WEBHOOK_SECRET")
     signature = request.headers.get("x-elevenlabs-signature", "")
-    raw_body = request.get_data()
+    body = request.get_data()
 
-    computed_hmac = hmac.new(
-        WEBHOOK_SECRET.encode(),
-        msg=raw_body,
-        digestmod=hashlib.sha256
-    ).hexdigest()
+    digest = hmac.new(secret.encode(), body, hashlib.sha256).digest()
+    computed_signature = base64.b64encode(digest).decode()
 
-    if not hmac.compare_digest(signature, computed_hmac):
-        return jsonify({"error": "Unauthorized"}), 401
+    if not hmac.compare_digest(signature, computed_signature):
+        return "Invalid signature", 403
 
-    print("✅ Webhook recebido com sucesso:", request.json)
-    return jsonify({"received": True})
+    payload = request.get_json()
+    print("✅ Webhook received:", payload)
 
+    return "", 204
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=False, host="0.0.0.0", port=10000)

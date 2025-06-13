@@ -1,75 +1,60 @@
-from flask import Flask, request, send_file, jsonify
-from flask_cors import CORS
 import os
-import json
-import websocket
-from io import BytesIO
+from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
+from websocket import create_connection
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-XI_API_KEY = os.getenv("XI_API_KEY")
-VOICE_ID = os.getenv("VOICE_ID")
+# Configurações (use seu modelo e voz específicos)
+ELEVENLABS_API_KEY = os.getenv("ELEVEN_API_KEY")
+VOICE_ID = os.getenv("VOICE_ID", "Sm1seazb4gs7RSlUVw7c")  # default ou defina no .env
 
 @app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Texto não fornecido"}), 400
+def handle_webhook():
+    try:
+        data = request.get_json()
+        text = data.get("text", "")
 
-    text = data["text"]
-    audio_bytes = stream_audio(text)
-    if not audio_bytes:
-        return jsonify({"error": "Falha ao gerar áudio"}), 500
+        if not text:
+            return jsonify({"error": "Texto não encontrado."}), 400
 
-    return send_file(BytesIO(audio_bytes), mimetype="audio/mpeg")
-
-def stream_audio(text):
-    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream-input"
-    headers = {
-        "xi-api-key": XI_API_KEY,
-        "Content-Type": "application/json"
-    }
-
-    audio_buffer = BytesIO()
-
-    def on_open(ws):
-        message = {
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.75
-            }
+        # Conexão WebSocket com ElevenLabs
+        ws_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream-input"
+        ws_headers = {
+            "xi-api-key": ELEVENLABS_API_KEY
         }
-        ws.send(json.dumps(message))
 
-    def on_message(ws, message):
-        try:
-            msg = json.loads(message)
-            if "audio" in msg:
-                chunk = bytes.fromhex(msg["audio"])
-                audio_buffer.write(chunk)
-        except Exception as e:
-            print("Erro ao processar chunk:", e)
+        ws = create_connection(ws_url, header=[f"xi-api-key: {ELEVENLABS_API_KEY}"])
 
-    def on_error(ws, error):
-        print("Erro no WebSocket:", error)
+        # Envia instruções iniciais
+        ws.send('{"text": "' + text + '", "model_id": "eleven_multilingual_v2"}')
 
-    ws = websocket.WebSocketApp(
-        url,
-        header=[f"{k}: {v}" for k, v in headers.items()],
-        on_open=on_open,
-        on_message=on_message,
-        on_error=on_error
-    )
+        # Recebe os dados de áudio (streaming)
+        audio_data = b""
+        while True:
+            chunk = ws.recv()
+            if isinstance(chunk, bytes):
+                audio_data += chunk
+            elif '"audio"' in chunk:
+                break
 
-    ws.run_forever()
-    return audio_buffer.getvalue()
+        ws.close()
+
+        # Retorna o áudio como base64 (ou salve e envie um link se preferir)
+        from base64 import b64encode
+        encoded_audio = b64encode(audio_data).decode("utf-8")
+
+        return jsonify({
+            "audio_base64": encoded_audio,
+            "message": "Stream recebido com sucesso."
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

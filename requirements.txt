@@ -3,5 +3,7 @@ requests==2.28.2
 python-dotenv==0.21.1
 flask-cors==3.0.10
 websocket-client==1.7.0
-pyaudio==0.2.13
+sounddevice==0.4.6
+nummpy
+
 

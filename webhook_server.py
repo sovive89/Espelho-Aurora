@@ -1,53 +1,57 @@
-import asyncio
-import websockets
-import json
-import base64
-import numpy as np
-import sounddevice as sd
+from flask import Flask, request, Response
 import os
+import requests
+import hmac
+import hashlib
 
+app = Flask(__name__)
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 VOICE_ID = "Sm1seazb4gs7RSlUVw7c"
-API_KEY = os.getenv("ELEVENLABS_API_KEY")  # ou cole direto
 
-samplerate = 22050
+def verify_signature(secret, body, signature):
+    if not signature:
+        return False
+    computed = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(computed, signature)
 
-async def speak_streamed_text(text_chunks):
-    uri = f"wss://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream-input"
-    headers = { "xi-api-key": API_KEY }
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    signature = request.headers.get("x-elevenlabs-signature")
+    raw_body = request.data
 
-    async with websockets.connect(uri, extra_headers=headers) as ws:
-        await ws.send(json.dumps({
-            "text": "",
-            "voice_settings": {
-                "stability": 0.5,
-                "similarity_boost": 0.5
-            }
-        }))
+    if not verify_signature(WEBHOOK_SECRET, raw_body, signature):
+        return {"error": "Invalid signature"}, 401
 
-        async def send_chunks():
-            for chunk in text_chunks:
-                await ws.send(json.dumps({
-                    "text": chunk,
-                    "try_trigger_generation": True
-                }))
-                await asyncio.sleep(0.1)
+    data = request.get_json()
+    input_text = data.get("input", "")
 
-        async def receive_audio():
-            async for message in ws:
-                data = json.loads(message)
-                if "audio" in data:
-                    audio_bytes = base64.b64decode(data["audio"])
-                    audio_np = np.frombuffer(audio_bytes, dtype=np.int16)
-                    sd.play(audio_np, samplerate=samplerate)
-                    sd.wait()
+    if not input_text:
+        return {"error": "No input provided"}, 400
 
-        await asyncio.gather(send_chunks(), receive_audio())
+    # Envia o texto para ElevenLabs
+    eleven_url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream"
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg"
+    }
+    payload = {
+        "text": input_text,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.5
+        }
+    }
 
-# Exemplo
+    response = requests.post(eleven_url, headers=headers, json=payload, stream=True)
+
+    if response.status_code != 200:
+        return {"error": "Failed to generate audio"}, 500
+
+    # Retorna o áudio direto
+    return Response(response.iter_content(chunk_size=1024), content_type="audio/mpeg")
+
 if __name__ == "__main__":
-    chunks = [
-        "Olá, ", "eu sou a Aurora. ",
-        "Estou aqui pra ajudar. ", 
-        "O que deseja saber hoje?"
-    ]
-    asyncio.run(speak_streamed_text(chunks))
+    app.run(host="0.0.0.0", port=5000)

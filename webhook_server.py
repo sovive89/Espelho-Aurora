@@ -1,57 +1,75 @@
-from flask import Flask, request, Response
+from flask import Flask, request, send_file, jsonify
+from flask_cors import CORS
 import os
-import requests
-import hmac
-import hashlib
+import json
+import websocket
+from io import BytesIO
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
 
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-VOICE_ID = "Sm1seazb4gs7RSlUVw7c"
-
-def verify_signature(secret, body, signature):
-    if not signature:
-        return False
-    computed = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(computed, signature)
+XI_API_KEY = os.getenv("XI_API_KEY")
+VOICE_ID = os.getenv("VOICE_ID")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    signature = request.headers.get("x-elevenlabs-signature")
-    raw_body = request.data
-
-    if not verify_signature(WEBHOOK_SECRET, raw_body, signature):
-        return {"error": "Invalid signature"}, 401
-
     data = request.get_json()
-    input_text = data.get("input", "")
+    if not data or "text" not in data:
+        return jsonify({"error": "Texto não fornecido"}), 400
 
-    if not input_text:
-        return {"error": "No input provided"}, 400
+    text = data["text"]
+    audio_bytes = stream_audio(text)
+    if not audio_bytes:
+        return jsonify({"error": "Falha ao gerar áudio"}), 500
 
-    # Envia o texto para ElevenLabs
-    eleven_url = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream"
+    return send_file(BytesIO(audio_bytes), mimetype="audio/mpeg")
+
+def stream_audio(text):
+    url = f"wss://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}/stream-input"
     headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "audio/mpeg"
+        "xi-api-key": XI_API_KEY,
+        "Content-Type": "application/json"
     }
-    payload = {
-        "text": input_text,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.5
+
+    audio_buffer = BytesIO()
+
+    def on_open(ws):
+        message = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75
+            }
         }
-    }
+        ws.send(json.dumps(message))
 
-    response = requests.post(eleven_url, headers=headers, json=payload, stream=True)
+    def on_message(ws, message):
+        try:
+            msg = json.loads(message)
+            if "audio" in msg:
+                chunk = bytes.fromhex(msg["audio"])
+                audio_buffer.write(chunk)
+        except Exception as e:
+            print("Erro ao processar chunk:", e)
 
-    if response.status_code != 200:
-        return {"error": "Failed to generate audio"}, 500
+    def on_error(ws, error):
+        print("Erro no WebSocket:", error)
 
-    # Retorna o áudio direto
-    return Response(response.iter_content(chunk_size=1024), content_type="audio/mpeg")
+    ws = websocket.WebSocketApp(
+        url,
+        header=[f"{k}: {v}" for k, v in headers.items()],
+        on_open=on_open,
+        on_message=on_message,
+        on_error=on_error
+    )
+
+    ws.run_forever()
+    return audio_buffer.getvalue()
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)

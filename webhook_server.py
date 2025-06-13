@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, Response, stream_with_context
 import os
 import hmac
+import time
 import hashlib
 from dotenv import load_dotenv
 
@@ -21,13 +22,21 @@ def webhook():
     signature = request.headers.get("x-elevenlabs-signature")
     raw_body = request.data
 
-    # Verificação HMAC
     if not verify_signature(WEBHOOK_SECRET, raw_body, signature):
         return jsonify({"error": "Invalid signature"}), 401
 
-    event = request.json
-    print("📩 Evento recebido:", event)
-    return jsonify({"status": "ok"}), 200
+    event = request.get_json()
+    print("🟢 Evento recebido:", event)
+
+    def generate_stream(texto):
+        for palavra in texto.split():
+            yield palavra + " "
+            time.sleep(0.2)
+
+    return Response(
+        stream_with_context(generate_stream(event.get("input", ""))),
+        mimetype="text/plain"
+    )
 
 def verify_signature(secret, body, signature):
     if not signature:

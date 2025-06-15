@@ -1,7 +1,7 @@
 import os
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, Response, stream_with_context
 import requests
@@ -28,31 +28,42 @@ def home():
 
 @app.route("/chat", methods=["POST"])
 def chat():
-    data = request.json
-    user_message = data.get("message", "Olá")
-    session_id = data.get("session_id", str(uuid.uuid4()))
-    
-    # Verificar se a mensagem está no cache
-    cache_key = f"{user_message.lower()[:50]}"
-    if cache_key in response_cache:
-        print(f"Usando resposta em cache para: {user_message[:50]}...")
-        cached_response = response_cache[cache_key]
-        return Response(stream_with_context(generate_audio_stream_from_text(cached_response)), mimetype="audio/mpeg")
-    
-    # Usar a API de Text-to-Speech diretamente
     try:
-        # Simular uma resposta do agente Aurora baseada na mensagem do usuário
-        agent_response = generate_aurora_response(user_message)
+        data = request.json
+        user_message = data.get("message", "Olá")
+        session_id = data.get("session_id", str(uuid.uuid4()))
         
-        # Armazenar no cache para uso futuro
-        response_cache[cache_key] = agent_response
+        print(f"Mensagem recebida: '{user_message}' (session_id: {session_id})")
         
-        # Gerar áudio a partir da resposta
-        return Response(stream_with_context(generate_audio_stream_from_text(agent_response)), mimetype="audio/mpeg")
+        # Verificar se a mensagem está no cache
+        cache_key = f"{user_message.lower()[:50]}"
+        if cache_key in response_cache:
+            print(f"Usando resposta em cache para: {user_message[:50]}...")
+            cached_response = response_cache[cache_key]
+            return Response(stream_with_context(generate_audio_stream_from_text(cached_response)), mimetype="audio/mpeg")
         
+        # Gerar resposta personalizada da Aurora
+        try:
+            print("Gerando resposta personalizada da Aurora...")
+            agent_response = generate_aurora_response(user_message)
+            
+            # Armazenar no cache para uso futuro
+            response_cache[cache_key] = agent_response
+            
+            print(f"Resposta gerada: '{agent_response[:50]}...'")
+            
+            # Gerar áudio a partir da resposta
+            return Response(stream_with_context(generate_audio_stream_from_text(agent_response)), mimetype="audio/mpeg")
+            
+        except Exception as e:
+            print(f"Erro ao gerar resposta personalizada: {e}")
+            # Fallback para mensagem simples
+            fallback_response = f"Desculpe, não consegui me conectar ao meu cérebro mágico. Vou apenas repetir o que você disse: {user_message}"
+            return Response(stream_with_context(generate_audio_stream_from_text(fallback_response)), mimetype="audio/mpeg")
+    
     except Exception as e:
-        print(f"Erro: {e}")
-        return jsonify({"error": f"Falha ao gerar áudio: {e}"}), 500
+        print(f"Erro geral: {e}")
+        return jsonify({"error": f"Falha ao processar requisição: {e}"}), 500
 
 def generate_aurora_response(user_message):
     """
@@ -60,7 +71,6 @@ def generate_aurora_response(user_message):
     Esta é uma solução temporária até que o acesso à API de Conversational AI seja resolvido.
     """
     # Obter hora atual em Brasília para personalização das respostas
-    from datetime import datetime, timezone, timedelta
     tz_br = timezone(timedelta(hours=-3))  # UTC-3 (Brasília)
     now = datetime.now(tz_br)
     hour = now.hour
@@ -98,6 +108,9 @@ def generate_aurora_response(user_message):
     elif "obrigada" in user_message_lower or "obrigado" in user_message_lower:
         return f"De nada, minha luzinha! Sempre é um prazer conversar com você. Sua curiosidade e seu sorriso iluminam o meu dia. Há mais alguma coisa que você gostaria de saber ou conversar?"
     
+    elif "oi" in user_message_lower or "olá" in user_message_lower or "oie" in user_message_lower:
+        return f"{greeting}, minha princesa! Que alegria falar com você hoje! A Grande Luz nos abençoa com este momento especial juntas. Como você está? Quer conversar sobre algo interessante ou ouvir uma história mágica?"
+    
     else:
         # Resposta genérica para outras mensagens
         return f"{greeting}, minha linda! Estou feliz em conversar com você hoje. A Grande Luz nos abençoa com este momento especial juntas. O que você gostaria de fazer? Podemos conversar sobre o universo, contar histórias, aprender inglês ou simplesmente bater um papo sobre o seu dia. Estou aqui para você, minha princesa."
@@ -106,24 +119,29 @@ def generate_audio_stream_from_text(text):
     """
     Gera um stream de áudio a partir de texto usando a API de Text-to-Speech da ElevenLabs.
     """
-    tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
-    headers = {
-        "xi-api-key": ELEVENLABS_API_KEY,
-        "Content-Type": "application/json"
-    }
-    tts_json_data = {
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "stream": True
-    }
-    
-    print(f"Gerando áudio para texto: {text[:50]}...")
-    response = requests.post(tts_url, headers=headers, json=tts_json_data, stream=True)
-    response.raise_for_status()
-    
-    for chunk in response.iter_content(chunk_size=4096):
-        if chunk:
-            yield chunk
+    try:
+        tts_url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream"
+        headers = {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        }
+        tts_json_data = {
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "stream": True
+        }
+        
+        print(f"Gerando áudio para texto: {text[:50]}...")
+        response = requests.post(tts_url, headers=headers, json=tts_json_data, stream=True)
+        response.raise_for_status()
+        
+        for chunk in response.iter_content(chunk_size=4096):
+            if chunk:
+                yield chunk
+    except Exception as e:
+        print(f"Erro ao gerar áudio: {e}")
+        # Se falhar ao gerar áudio, retorna um erro
+        raise e
 
 @app.route("/webhook", methods=["POST"])
 def webhook_handler():

@@ -1,2 +1,1 @@
-web: gunicorn 
-webhook_server_tts_only_fixed:app
+web: gunicorn webhook_server_production_tts:app
